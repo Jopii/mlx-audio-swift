@@ -6,7 +6,7 @@
 //
 
 import Foundation
-import MLX
+@preconcurrency import MLX
 import HuggingFace
 import Tokenizers
 import MLXLMCommon
@@ -29,6 +29,52 @@ let endOfAI = tokenizerLength + 6  // 151675
 let padTokenId = tokenizerLength + 7  // 151676
 let audioTokensStart = tokenizerLength + 10  // 151679
 
+// MARK: - Error Types
+
+public enum Qwen3Error: Error, LocalizedError {
+    case modelNotInitialized(String)
+    case generationFailed(String)
+    case invalidInput(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .modelNotInitialized(let message):
+            return "Model not initialized: \(message)"
+        case .generationFailed(let message):
+            return "Generation failed: \(message)"
+        case .invalidInput(let message):
+            return "Invalid input: \(message)"
+        }
+    }
+}
+
+// MARK: - Generation Types
+
+/// Information about the generation process.
+public struct Qwen3GenerationInfo: Sendable {
+    public let promptTokenCount: Int
+    public let generationTokenCount: Int
+    public let prefillTime: TimeInterval
+    public let generateTime: TimeInterval
+    public let tokensPerSecond: Double
+
+    public var summary: String {
+        """
+        Prompt:     \(promptTokenCount) tokens, \(String(format: "%.2f", Double(promptTokenCount) / prefillTime)) tokens/s, \(String(format: "%.3f", prefillTime))s
+        Generation: \(generationTokenCount) tokens, \(String(format: "%.2f", tokensPerSecond)) tokens/s, \(String(format: "%.3f", generateTime))s
+        """
+    }
+}
+
+/// Events emitted during audio generation.
+public enum Qwen3Generation: Sendable {
+    /// A generated token ID
+    case token(Int)
+    /// Generation statistics
+    case info(Qwen3GenerationInfo)
+    /// Final generated audio
+    case audio(MLXArray)
+}
 
 // MARK: - Decode
 func decodeAudioFromCodes(codeList: [Int], snacModel: SNAC) -> MLXArray {
@@ -56,7 +102,8 @@ func decodeAudioFromCodes(codeList: [Int], snacModel: SNAC) -> MLXArray {
         MLXArray(layer3).expandedDimensions(axis: 0)
     ]
 
-    let audioHat = snacModel.decode(codes).squeezed(axis: -1)
+    // SNAC decode returns [batch, channels, samples] - squeeze batch and channel dims
+    let audioHat = snacModel.decode(codes).squeezed()
     return audioHat
 }
 
@@ -159,6 +206,8 @@ public class Attention: Module {
         if let cache {
             queries = rope(queries, offset: cache.offset)
             keys = rope(keys, offset: cache.offset)
+            // Update cache and get full key/value history
+            (keys, values) = cache.update(keys: keys, values: values)
         } else {
             queries = rope(queries)
             keys = rope(keys)
@@ -292,27 +341,50 @@ public class Qwen3Model: Module, KVCacheDimensionProvider {
     }
 
     public func parseOutput(_ inputIds: MLXArray) -> [[Int]] {
-        let tokenToFind = startOfSpeech
         let tokenToRemove = endOfSpeech
 
-        // Create mask and find indices manually
-        let mask = inputIds .== tokenToFind
-        var indices: [(Int, Int)] = []
+        // First try to find START_OF_SPEECH
+        var startIdx: Int? = nil
 
-        for i in 0..<mask.shape[0] {
-            for j in 0..<mask.shape[1] {
-                if mask[i, j].item(Int.self) != 0 {
-                    indices.append((i, j))
+        // Create mask for START_OF_SPEECH
+        let sosMask = inputIds .== startOfSpeech
+        for i in 0..<sosMask.shape[0] {
+            for j in 0..<sosMask.shape[1] {
+                if sosMask[i, j].item(Int.self) != 0 {
+                    startIdx = j
+                }
+            }
+        }
+
+        // If START_OF_SPEECH not found, look for START_OF_AI and find first audio token after it
+        if startIdx == nil {
+            let soaMask = inputIds .== startOfAI
+            var soaIdx: Int? = nil
+            for i in 0..<soaMask.shape[0] {
+                for j in 0..<soaMask.shape[1] {
+                    if soaMask[i, j].item(Int.self) != 0 {
+                        soaIdx = j
+                    }
+                }
+            }
+
+            // Find first token >= audioTokensStart after START_OF_AI
+            if let soaIdx = soaIdx {
+                let rowList = inputIds[0].asArray(Int.self)
+                for j in (soaIdx + 1)..<rowList.count {
+                    if rowList[j] >= audioTokensStart {
+                        startIdx = j - 1  // Start just before first audio token
+                        break
+                    }
                 }
             }
         }
 
         var croppedTensor: MLXArray
 
-        // Check if we found any tokens
-        if !indices.isEmpty {
-            let lastOccurrenceIdx = indices.last!.1
-            croppedTensor = inputIds[0..., (lastOccurrenceIdx + 1)...]
+        // Check if we found a starting point
+        if let idx = startIdx {
+            croppedTensor = inputIds[0..., (idx + 1)...]
         } else {
             croppedTensor = inputIds
         }
@@ -476,17 +548,247 @@ public class Qwen3Model: Module, KVCacheDimensionProvider {
 
     public func post_load_hook(model: Qwen3Model, modelDir: URL) async throws {
         if model.tokenizer == nil {
-            model.tokenizer = try await AutoTokenizer.from(pretrained: modelDir.path)
+            model.tokenizer = try await AutoTokenizer.from(modelFolder: modelDir)
         }
         if model._snacModel == nil {
             model._snacModel = try await SNAC.fromPretrained("mlx-community/snac_24khz")
         }
     }
 
+    // MARK: - Generation using MLXLMCommon evaluate pattern
+
+    /// Generate audio from text using MLXLMCommon's evaluate-style token generation.
+    ///
+    /// This follows the pattern from MLXLMCommon's `generate` function with:
+    /// - Configurable sampling (temperature, top-p)
+    /// - Repetition penalty via LogitProcessor
+    /// - KV cache for efficient generation
+    ///
+    /// - Parameters:
+    ///   - text: The text to synthesize
+    ///   - voice: Optional voice identifier (e.g., "en-us-1")
+    ///   - parameters: Generation parameters (temperature, topP, maxTokens, etc.)
+    /// - Returns: Generated audio as MLXArray
+    public func generate(
+        text: String,
+        voice: String? = nil,
+        parameters: GenerateParameters = GenerateParameters(
+            maxTokens: 1200,
+            temperature: 0.6,
+            topP: 0.8,
+            repetitionPenalty: 1.3,
+            repetitionContextSize: 20
+        )
+    ) async throws -> MLXArray {
+        guard let snacModel = _snacModel else {
+            throw Qwen3Error.modelNotInitialized("SNAC model not loaded")
+        }
+        guard tokenizer != nil else {
+            throw Qwen3Error.modelNotInitialized("Tokenizer not loaded")
+        }
+
+        // Prepare input
+        let prompt = text.replacingOccurrences(of: "\\n", with: "\n")
+            .replacingOccurrences(of: "\\t", with: "\t")
+
+        let (inputIds, _) = prepareInputIds(prompts: [prompt], voice: voice)
+
+        // Create sampler and processor from parameters
+        let sampler = parameters.sampler()
+        var processor = parameters.processor()
+
+        // Initialize prompt tokens for processor
+        let promptTokens = inputIds.squeezed(axis: 0)
+        processor?.prompt(promptTokens)
+
+        // Create KV cache
+        let cache: [KVCache] = (0..<configuration.hiddenLayers).map { _ in
+            KVCacheSimple()
+        }
+
+        // Track generated tokens
+        var allTokens = inputIds
+        let maxTokens = parameters.maxTokens ?? 1200
+
+        // Prefill: process the prompt
+        var logits = self(inputIds, cache: cache)
+
+        // Generate tokens
+        for i in 0..<maxTokens {
+            // Get logits for the last position
+            var lastLogits = logits[0..., -1, 0...]
+
+            // Apply logit processor (repetition penalty)
+            lastLogits = processor?.process(logits: lastLogits) ?? lastLogits
+
+            // Sample next token
+            let nextToken = sampler.sample(logits: lastLogits)
+
+            // Notify processor of sampled token
+            processor?.didSample(token: nextToken)
+
+            // Check for end of speech
+            let tokenValue = nextToken.item(Int.self)
+            if tokenValue == endOfSpeech {
+                break
+            }
+
+            // Append token to sequence
+            let nextTokenExpanded = nextToken.reshaped([1, 1])
+            allTokens = concatenated([allTokens, nextTokenExpanded], axis: 1)
+
+            // Forward pass with just the new token (using cache)
+            logits = self(nextTokenExpanded, cache: cache)
+
+            // Periodically clear GPU cache
+            if i % 50 == 0 {
+                Memory.clearCache()
+            }
+
+            // Async evaluation for pipelining
+            eval(logits)
+        }
+
+        // Parse output to audio codes
+        let codeLists = parseOutput(allTokens)
+
+        guard let codeList = codeLists.first, !codeList.isEmpty else {
+            throw Qwen3Error.generationFailed("No audio codes generated")
+        }
+
+        // Decode audio using SNAC
+        let audio = decodeAudioFromCodes(codeList: codeList, snacModel: snacModel)
+
+        return audio
+    }
+
+    /// Generate audio with streaming token output.
+    ///
+    /// Returns an AsyncThrowingStream that yields generation events including tokens and final audio.
+    ///
+    /// - Parameters:
+    ///   - text: The text to synthesize
+    ///   - voice: Optional voice identifier
+    ///   - parameters: Generation parameters
+    /// - Returns: AsyncThrowingStream of Qwen3Generation events
+    public func generateStream(
+        text: String,
+        voice: String? = nil,
+        parameters: GenerateParameters = GenerateParameters(
+            maxTokens: 1200,
+            temperature: 0.6,
+            topP: 0.8,
+            repetitionPenalty: 1.3,
+            repetitionContextSize: 20
+        )
+    ) -> AsyncThrowingStream<Qwen3Generation, Error> {
+        AsyncThrowingStream { continuation in
+            Task {
+                do {
+                    guard let snacModel = self._snacModel else {
+                        throw Qwen3Error.modelNotInitialized("SNAC model not loaded")
+                    }
+                    guard self.tokenizer != nil else {
+                        throw Qwen3Error.modelNotInitialized("Tokenizer not loaded")
+                    }
+
+                    let prompt = text.replacingOccurrences(of: "\\n", with: "\n")
+                        .replacingOccurrences(of: "\\t", with: "\t")
+
+                    let (inputIds, _) = self.prepareInputIds(prompts: [prompt], voice: voice)
+
+                    let sampler = parameters.sampler()
+                    var processor = parameters.processor()
+
+                    let promptTokens = inputIds.squeezed(axis: 0)
+                    processor?.prompt(promptTokens)
+
+                    let cache: [KVCache] = (0..<self.configuration.hiddenLayers).map { _ in
+                        KVCacheSimple()
+                    }
+
+                    var allTokens = inputIds
+                    let maxTokens = parameters.maxTokens ?? 1200
+
+                    let startTime = Date()
+
+                    // Prefill
+                    var logits = self(inputIds, cache: cache)
+                    let prefillTime = Date().timeIntervalSince(startTime)
+
+                    var tokenCount = 0
+                    let generateStartTime = Date()
+
+                    // Generate tokens
+                    for _ in 0..<maxTokens {
+                        if Task.isCancelled { break }
+
+                        var lastLogits = logits[0..., -1, 0...]
+                        lastLogits = processor?.process(logits: lastLogits) ?? lastLogits
+
+                        let nextToken = sampler.sample(logits: lastLogits)
+                        processor?.didSample(token: nextToken)
+
+                        let tokenValue = nextToken.item(Int.self)
+                        tokenCount += 1
+
+                        // Yield token event
+                        continuation.yield(.token(tokenValue))
+
+                        if tokenValue == endOfSpeech {
+                            break
+                        }
+
+                        let nextTokenExpanded = nextToken.reshaped([1, 1])
+                        allTokens = concatenated([allTokens, nextTokenExpanded], axis: 1)
+
+                        logits = self(nextTokenExpanded, cache: cache)
+
+                        if tokenCount % 50 == 0 {
+                            Memory.clearCache()
+                        }
+
+                        eval(logits)
+                    }
+
+                    let generateTime = Date().timeIntervalSince(generateStartTime)
+
+                    // Parse and decode audio
+                    let codeLists = self.parseOutput(allTokens)
+
+                    guard let codeList = codeLists.first, !codeList.isEmpty else {
+                        throw Qwen3Error.generationFailed("No audio codes generated")
+                    }
+
+                    let audio = decodeAudioFromCodes(codeList: codeList, snacModel: snacModel)
+
+                    // Yield completion info
+                    let info = Qwen3GenerationInfo(
+                        promptTokenCount: inputIds.shape[1],
+                        generationTokenCount: tokenCount,
+                        prefillTime: prefillTime,
+                        generateTime: generateTime,
+                        tokensPerSecond: Double(tokenCount) / generateTime
+                    )
+                    continuation.yield(.info(info))
+
+                    // Yield final audio
+                    continuation.yield(.audio(audio))
+
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+        }
+    }
+
     public static func fromPretrained(_ modelRepo: String) async throws -> Qwen3Model {
         let client = HubClient.default
 
-        let snapshotDir = FileManager.default.temporaryDirectory
+        // Create a unique subdirectory for this model to avoid conflicts with other downloads
+        let modelSubdir = modelRepo.replacingOccurrences(of: "/", with: "_")
+        let snapshotDir = FileManager.default.temporaryDirectory.appendingPathComponent("mlx-audio-\(modelSubdir)")
 
 
         let progress = Progress(totalUnitCount: 0)
@@ -512,7 +814,7 @@ public class Qwen3Model: Module, KVCacheDimensionProvider {
         })
 
 
-        let configPath = snapshotDir.appendingPathComponent("config.json")
+        let configPath = modelDir.appendingPathComponent("config.json")
         let configData = try Data(contentsOf: configPath)
         let config = try JSONDecoder().decode(Qwen3Configuration.self, from: configData)
 
