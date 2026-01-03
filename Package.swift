@@ -31,9 +31,9 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/ml-explore/mlx-swift.git", branch: "main"),
-        .package(url: "https://github.com/ml-explore/mlx-swift-lm.git", branch: "main"),
+        .package(url: "https://github.com/Blaizzy/mlx-swift-lm.git", branch: "main"),
         .package(url: "https://github.com/huggingface/swift-transformers", .upToNextMinor(from: "1.1.0")),
-        .package(url: "https://github.com/huggingface/swift-huggingface.git", from: "0.5.0")
+        .package(url: "https://github.com/Blaizzy/swift-huggingface.git", branch: "main")
 
     ],
     targets: [
@@ -79,8 +79,7 @@ let package = Package(
             ],
             path: "Sources/MLXAudioTTS",
             resources: [
-                .process("Models/Kokoro/Resources"),
-                .process("Models/Orpheus/Resources")
+                .process("Models/Kokoro/Resources")
             ]
         ),
 
