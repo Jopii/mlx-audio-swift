@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import MLXAudioCore
 
 final class AudioPlayback {
     private let sampleRate: Double
