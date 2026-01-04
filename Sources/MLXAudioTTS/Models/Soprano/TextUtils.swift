@@ -2,8 +2,7 @@
 //  TextUtils.swift
 //  MLXAudio
 //
-//  Text normalization utilities for Soprano TTS.
-//  Ported from mlx_audio/tts/models/soprano/text.py
+//  Created by Prince Canuma on 04/01/2026.
 //
 
 import Foundation

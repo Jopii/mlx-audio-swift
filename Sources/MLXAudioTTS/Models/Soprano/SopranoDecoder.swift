@@ -2,8 +2,7 @@
 //  SopranoDecoder.swift
 //  MLXAudio
 //
-//  Soprano Decoder for converting LLM hidden states to audio.
-//  Ported from mlx_audio/tts/models/soprano/decoder.py
+//  Created by Prince Canuma on 04/01/2026.
 //
 
 import Foundation

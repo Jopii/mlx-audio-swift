@@ -2,8 +2,7 @@
 //  Soprano.swift
 //  MLXAudio
 //
-//  Soprano TTS Model - Ultra-lightweight text-to-speech with ~80M parameters.
-//  Ported from https://github.com/ekwek1/soprano
+//  Created by Prince Canuma on 04/01/2026.
 //
 
 import Foundation
@@ -318,61 +317,200 @@ public class SopranoModel: Module, KVCacheDimensionProvider {
             let trimmedText = text.trimmingCharacters(in: .whitespaces)
             let cleanedText = cleanTextForSoprano(trimmedText)
 
-            // Create single prompt with the entire text (matching Python behavior)
-            let prompt = "[STOP][TEXT]\(cleanedText)[START]"
-            results.append((prompt, textIdx, 0))
+            // Split at sentence boundaries (matching Python: re.split(r"(?<=[.!?])\s+", text))
+            // This regex splits after .!? followed by whitespace
+            let sentences = splitIntoSentences(cleanedText)
+
+            // Process sentences, merging short ones
+            var processed: [(text: String, textIdx: Int)] = sentences.map { (text: $0, textIdx: textIdx) }
+
+            if minLength > 0 && processed.count > 1 {
+                var merged: [(text: String, textIdx: Int)] = []
+                var i = 0
+                while i < processed.count {
+                    let cur = processed[i]
+                    if cur.text.count < minLength {
+                        if !merged.isEmpty {
+                            // Merge with previous
+                            let prev = merged.removeLast()
+                            merged.append((text: (prev.text + " " + cur.text).trimmingCharacters(in: .whitespaces), textIdx: prev.textIdx))
+                        } else if i + 1 < processed.count {
+                            // Merge with next
+                            processed[i + 1] = (text: (cur.text + " " + processed[i + 1].text).trimmingCharacters(in: .whitespaces), textIdx: processed[i + 1].textIdx)
+                        } else {
+                            merged.append(cur)
+                        }
+                    } else {
+                        merged.append(cur)
+                    }
+                    i += 1
+                }
+                processed = merged
+            }
+
+            // Create prompts for each sentence
+            for (sentenceIdx, item) in processed.enumerated() {
+                let prompt = "[STOP][TEXT]\(item.text)[START]"
+                results.append((prompt, item.textIdx, sentenceIdx))
+            }
         }
 
         return results
     }
+
+    /// Split text into sentences at .!? followed by whitespace
+    private func splitIntoSentences(_ text: String) -> [String] {
+        // Match Python: re.split(r"(?<=[.!?])\s+", text)
+        // Split after .!? when followed by whitespace
+        guard let regex = try? NSRegularExpression(pattern: "(?<=[.!?])\\s+", options: []) else {
+            return [text]
+        }
+
+        let nsText = text as NSString
+        let range = NSRange(location: 0, length: nsText.length)
+        let matches = regex.matches(in: text, options: [], range: range)
+
+        if matches.isEmpty {
+            return [text]
+        }
+
+        var sentences: [String] = []
+        var lastEnd = 0
+
+        for match in matches {
+            let sentenceRange = NSRange(location: lastEnd, length: match.range.location - lastEnd)
+            let sentence = nsText.substring(with: sentenceRange)
+            if !sentence.isEmpty {
+                sentences.append(sentence)
+            }
+            lastEnd = match.range.location + match.range.length
+        }
+
+        // Add remaining text after last match
+        if lastEnd < nsText.length {
+            let remaining = nsText.substring(from: lastEnd)
+            if !remaining.isEmpty {
+                sentences.append(remaining)
+            }
+        }
+
+        return sentences
+    }
     /// Space token ID in Soprano vocabulary
-    private let spaceTokenId: Int = 8004
+    private let spaceTokenId = 8004
+
+    /// Special tokens that should be preserved as-is
+    private let specialTokenPattern = #"\[(STOP|TEXT|START)\]"#
+
+    /// Pre-tokenize pattern matching Soprano's tokenizer config
+    /// Pattern: `\s+|\w+|[^\w\s]+` with behavior "Isolated"
+    private let preTokenizePattern = #"\s+|\w+|[^\w\s]+"#
 
     private func tokenize(_ text: String) -> MLXArray {
         guard let tokenizer = tokenizer else {
             fatalError("Tokenizer not initialized")
         }
 
-        // Swift-transformers doesn't correctly handle the pre-tokenizer "Split" with "Isolated" behavior
-        // which should preserve space tokens. Work around by tokenizing each segment separately
-        // and inserting space tokens between them.
+        // Split text into special tokens and regular segments
+        // Special tokens like [STOP], [TEXT], [START] need to be encoded as-is
+        let segments = splitBySpecialTokens(text)
 
-        // Split the prompt into parts: special tokens and text
-        // Pattern: [STOP], [TEXT], content, [START]
-        var tokens: [Int] = []
+        var allTokens: [Int] = []
 
-        // Extract the text content from the prompt format "[STOP][TEXT]...[START]"
-        if text.hasPrefix("[STOP][TEXT]") && text.hasSuffix("[START]") {
-            // Add [STOP] token (id=3)
-            tokens.append(3)
-            // Add [TEXT] token (id=1)
-            tokens.append(1)
+        for segment in segments {
+            if isSpecialToken(segment) {
+                // Special tokens are handled directly by the tokenizer
+                let tokens = tokenizer.encode(text: segment, addSpecialTokens: false)
+                allTokens.append(contentsOf: tokens)
+            } else {
+                // For regular text, pre-tokenize to handle spaces correctly
+                // swift-transformers has a bug where BPETokenizer.tokenize() drops space tokens
+                // because " ".split(separator: " ") returns empty array
+                let chunks = preTokenizeText(segment)
 
-            // Extract content between [TEXT] and [START]
-            let startIdx = text.index(text.startIndex, offsetBy: 12) // After "[STOP][TEXT]"
-            let endIdx = text.index(text.endIndex, offsetBy: -7) // Before "[START]"
-            let content = String(text[startIdx..<endIdx])
-
-            // Tokenize content word by word, inserting space tokens between
-            let words = content.split(separator: " ", omittingEmptySubsequences: false)
-            for (i, word) in words.enumerated() {
-                if i > 0 {
-                    // Insert space token between words
-                    tokens.append(spaceTokenId)
+                for chunk in chunks {
+                    if chunk.allSatisfy({ $0.isWhitespace }) {
+                        // For each space character, add a space token
+                        for _ in chunk {
+                            allTokens.append(spaceTokenId)
+                        }
+                    } else {
+                        // Use tokenizer for non-whitespace chunks
+                        let chunkTokens = tokenizer.encode(text: chunk, addSpecialTokens: false)
+                        allTokens.append(contentsOf: chunkTokens)
+                    }
                 }
-                // Tokenize the word (without special tokens)
-                let wordTokens = tokenizer.encode(text: String(word))
-                tokens.append(contentsOf: wordTokens)
             }
-
-            // Add [START] token (id=2)
-            tokens.append(2)
-        } else {
-            // Fallback to regular tokenization
-            tokens = tokenizer.encode(text: text)
         }
 
-        return MLXArray(tokens.map { Int32($0) })
+
+        return MLXArray(allTokens.map { Int32($0) })
+    }
+
+    /// Check if a string is a special token
+    private func isSpecialToken(_ text: String) -> Bool {
+        return text == "[STOP]" || text == "[TEXT]" || text == "[START]"
+    }
+
+    /// Split text into special tokens and regular segments
+    private func splitBySpecialTokens(_ text: String) -> [String] {
+        guard let regex = try? NSRegularExpression(pattern: specialTokenPattern, options: []) else {
+            return [text]
+        }
+
+        let nsText = text as NSString
+        let range = NSRange(location: 0, length: nsText.length)
+        let matches = regex.matches(in: text, options: [], range: range)
+
+        if matches.isEmpty {
+            return [text]
+        }
+
+        var segments: [String] = []
+        var lastEnd = 0
+
+        for match in matches {
+            // Add text before this special token
+            if match.range.location > lastEnd {
+                let beforeRange = NSRange(location: lastEnd, length: match.range.location - lastEnd)
+                let before = nsText.substring(with: beforeRange)
+                if !before.isEmpty {
+                    segments.append(before)
+                }
+            }
+
+            // Add the special token itself
+            let specialToken = nsText.substring(with: match.range)
+            segments.append(specialToken)
+
+            lastEnd = match.range.location + match.range.length
+        }
+
+        // Add remaining text after the last special token
+        if lastEnd < nsText.length {
+            let remaining = nsText.substring(from: lastEnd)
+            if !remaining.isEmpty {
+                segments.append(remaining)
+            }
+        }
+
+        return segments
+    }
+
+    /// Pre-tokenize text using Soprano's tokenizer pattern
+    /// Splits into chunks: words, whitespace runs, and punctuation
+    private func preTokenizeText(_ text: String) -> [String] {
+        guard let regex = try? NSRegularExpression(pattern: preTokenizePattern, options: []) else {
+            return [text]
+        }
+
+        let nsText = text as NSString
+        let range = NSRange(location: 0, length: nsText.length)
+        let matches = regex.matches(in: text, options: [], range: range)
+
+        return matches.map { match in
+            nsText.substring(with: match.range)
+        }
     }
 
     // MARK: - Generation
@@ -440,10 +578,7 @@ public class SopranoModel: Module, KVCacheDimensionProvider {
         // Process each chunk separately
         for promptChunk in prompts {
             let sentenceData = self.preprocessText([promptChunk])
-            print("================================================")
-            print("Generate()")
-            print("Sentence data: \(sentenceData)")
-            print("================================================")
+
 
             for (promptText, _, _) in sentenceData {
                 let inputIds = self.tokenize(promptText)
@@ -454,7 +589,7 @@ public class SopranoModel: Module, KVCacheDimensionProvider {
                     maxTokens: maxTokens,
                     temperature: parameters.temperature ?? 0.3,
                     topP: parameters.topP ?? 0.95,
-                    repetitionPenalty: parameters.repetitionPenalty ?? 1.5,
+                    repetitionPenalty: parameters.repetitionPenalty ?? 1.0,  // Match Python (no penalty)
                     repetitionContextSize: parameters.repetitionContextSize ?? 30
                 ) {
                     allHiddenStates.append(hiddenState)
@@ -523,11 +658,6 @@ public class SopranoModel: Module, KVCacheDimensionProvider {
                     let startTime = Date()
                     let sentenceData = self.preprocessText([prompt])
 
-                    print("================================================")
-                    print("GenerateStream()")
-                    print("Sentence data: \(sentenceData)")
-                    print("================================================")
-
                     var audioParts: [MLXArray] = []
                     var totalTokens = 0
                     let maxTokens = parameters.maxTokens ?? 512
@@ -541,12 +671,10 @@ public class SopranoModel: Module, KVCacheDimensionProvider {
                             maxTokens: maxTokens,
                             temperature: parameters.temperature ?? 0.3,
                             topP: parameters.topP ?? 0.95,
-                            repetitionPenalty: parameters.repetitionPenalty ?? 1.5,
+                            repetitionPenalty: parameters.repetitionPenalty ?? 1.0,  // Match Python (no penalty)
                             repetitionContextSize: parameters.repetitionContextSize ?? 30
                         ) {
                             allHiddenStates.append(hiddenState)
-
-                            print("Token: \(token)")
 
                             if let tokenVal = token {
                                 continuation.yield(.token(tokenVal))
@@ -561,15 +689,6 @@ public class SopranoModel: Module, KVCacheDimensionProvider {
 
                         // Decode to audio
                         var audio = self.decoder(hiddenStates)
-
-                        print("================================================")
-                        print("GenerateStream()")
-                        print("Audio shape: \(audio.shape)")
-                        print("Token count: \(tokenCount)")
-                        print("Token size: \(self.configuration.tokenSize)")
-
-                        print("Hidden states shape: \(hiddenStates.shape)")
-                        print("================================================")
 
                         let tokenSize = self.configuration.tokenSize
                         let audioLength = tokenCount * tokenSize - tokenSize
@@ -650,7 +769,7 @@ public class SopranoModel: Module, KVCacheDimensionProvider {
                 // Generate tokens
                 var currentLogits = logits
 
-                for _ in 0..<maxTokens {
+                for tokenIdx in 0..<maxTokens {
                     // Get last logits
                     var lastLogits = currentLogits[0..., -1, 0...]
                     eval(lastLogits)
@@ -675,14 +794,14 @@ public class SopranoModel: Module, KVCacheDimensionProvider {
 
                     let tokenId = nextToken.item(Int.self)
 
-                    // Check for stop token
-                    if let stopId = self.stopTokenId, tokenId == stopId {
-                        break
+                    // Debug: show top 5 logits and stop token logit
+                    if tokenIdx < 5 || tokenIdx % 50 == 0 {
+                        let top5Indices = argSort(-lastLogits, axis: -1)[0..<5]
+                        let stopLogit = lastLogits.ndim == 2 ? lastLogits[0, 3] : lastLogits[3]
                     }
-                    if tokenId == self.configuration.eosTokenId {
-                        break
-                    }
-                    if tokenId == self.configuration.padTokenId {
+
+                    // Check for stop token ([STOP] = token ID 3)
+                    if tokenId == self.stopTokenId {
                         break
                     }
 
@@ -774,13 +893,8 @@ public class SopranoModel: Module, KVCacheDimensionProvider {
 
         // Load tokenizer
         model.tokenizer = try await AutoTokenizer.from(modelFolder: modelDir)
-
-        // Set stop token ID
-        if let tokenizer = model.tokenizer {
-            let stopTokens = tokenizer.encode(text: "[STOP]")
-            if !stopTokens.isEmpty {
-                model.stopTokenId = stopTokens[0]
-            }
+        if model.tokenizer != nil {
+            model.stopTokenId = model.tokenizer?.eosTokenId ?? 3
         }
 
         return model
@@ -841,33 +955,71 @@ private func resolveOrDownloadSopranoModel(
     return modelDir
 }
 
-// MARK: - TopP Sampler
+// MARK: - TopP Sampler (matching Python's mlx_lm implementation)
 
 private struct TopPSampler {
     let temperature: Float
     let topP: Float
 
-    func sample(logits: MLXArray) -> MLXArray {
-        var probs = softmax(logits / temperature, axis: -1)
+    /// Apply top-p filtering to logits (returns logits with -inf for excluded tokens)
+    /// Matches Python's apply_top_p from mlx_lm/sample_utils.py
+    private func applyTopP(logprobs: MLXArray) -> MLXArray {
+        // Convert to probabilities for cumsum calculation
+        let probs = exp(logprobs)
 
-        // Sort probabilities descending
-        let sortedIndices = argSort(probs, axis: -1)
+        // Sort in ascending order (smallest probs first)
+        let sortedIndices = argSort(logprobs, axis: -1)
         let sortedProbs = take(probs, sortedIndices, axis: -1)
 
         // Compute cumulative probabilities
-        let cumProbs = cumsum(sortedProbs, axis: -1)
+        let cumulativeProbs = cumsum(sortedProbs, axis: -1)
 
-        // Find cutoff
-        let cutoffMask = cumProbs .> (1 - topP)
+        // Create inverse indices to map back to original order
+        // This replicates Python's put_along_axis approach
+        let vocabSize = sortedIndices.shape[0]
+        let arange = MLXArray(Int32(0)..<Int32(vocabSize))
 
-        // Zero out probabilities below cutoff
-        probs = MLX.where(cutoffMask, probs, MLXArray(Float(0)))
+        // Create inverse mapping: for each position in original order,
+        // find its cumulative probability
+        var inverseIndices = [Int32](repeating: 0, count: vocabSize)
+        let sortedIndicesArray = sortedIndices.asArray(Int32.self)
+        for (sortedPos, originalPos) in sortedIndicesArray.enumerated() {
+            inverseIndices[Int(originalPos)] = Int32(sortedPos)
+        }
+        let inverseIndicesArray = MLXArray(inverseIndices)
 
-        // Renormalize
-        let probSum = sum(probs, axis: -1, keepDims: true)
-        probs = probs / maximum(probSum, MLXArray(Float(1e-8)))
+        // Rearrange cumulative probs back to original vocabulary order
+        let cumulativeProbsOriginalOrder = take(cumulativeProbs, inverseIndicesArray, axis: -1)
 
-        // Sample from distribution
-        return categorical(probs)
+        // Keep tokens where cumulative prob > (1 - top_p)
+        // These are the TOP tokens that make up the nucleus
+        let threshold = MLXArray(1.0 - topP)
+        let mask = cumulativeProbsOriginalOrder .> threshold
+
+        // Set excluded tokens to -inf in log space
+        let negInf = MLXArray(-Float.infinity)
+        return MLX.where(mask, logprobs, negInf)
+    }
+
+    func sample(logits: MLXArray) -> MLXArray {
+        // Ensure logits is 1D for processing
+        let logits1D: MLXArray
+        if logits.ndim == 2 {
+            logits1D = logits.squeezed(axis: 0)  // [1, vocab] -> [vocab]
+        } else {
+            logits1D = logits
+        }
+
+        // Apply top-p filtering in log space (sets excluded tokens to -inf)
+        let filteredLogits = applyTopP(logprobs: logits1D)
+
+        // Sample using categorical with temperature scaling
+        // categorical expects log probabilities (logits), not probabilities!
+        // This matches Python's: mx.random.categorical(logits * (1 / temp))
+        let scaledLogits = filteredLogits / temperature
+        let scaledLogits2D = scaledLogits.expandedDimensions(axis: 0)  // [1, vocab]
+        let sampledToken = categorical(scaledLogits2D)  // [1]
+
+        return sampledToken.reshaped([1])
     }
 }

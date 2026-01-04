@@ -224,3 +224,128 @@ struct LlamaTTSTests {
 
 
 }
+
+
+// Run Soprano tests with:  xcodebuild test \
+// -scheme MLXAudio-Package \
+// -destination 'platform=macOS' \
+// -only-testing:MLXAudioTests/SopranoTTSTests \
+// 2>&1 | grep -E "(Suite.*started|Test test.*started|Loading|Loaded|Generating|Generated|Saved|passed after|failed after|TEST SUCCEEDED|TEST FAILED|Suite.*passed|Test run)"
+
+
+struct SopranoTTSTests {
+
+    /// Test basic text-to-speech generation with Soprano model
+    @Test func testSopranoGenerate() async throws {
+        // 1. Load Soprano model from HuggingFace
+        print("\u{001B}[33mLoading Soprano TTS model...\u{001B}[0m")
+        let model = try await SopranoModel.fromPretrained("mlx-community/Soprano-80M-bf16")
+        print("\u{001B}[32mSoprano model loaded!\u{001B}[0m")
+
+        // 2. Generate audio from text
+        let text = "Performance Optimization: Automatic model quantization and hardware optimization that delivers 30%-100% faster inference than standard implementations."
+        print("\u{001B}[33mGenerating audio for: \"\(text)\"...\u{001B}[0m")
+
+        // Use temperature=0.0 for deterministic generation (same as hello world test)
+        let parameters = GenerateParameters(
+            maxTokens: 200,
+            temperature: 0.3,
+            topP: 0.95,
+        )
+
+        let audio = try await model.generate(
+            text: text,
+            voice: nil,
+            parameters: parameters
+        )
+
+        print("\u{001B}[32mGenerated audio shape: \(audio.shape)\u{001B}[0m")
+
+        // 3. Basic checks
+        #expect(audio.shape[0] > 0, "Audio should have samples")
+
+        // 4. Save generated audio
+        let outputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("soprano_test_output.wav")
+        try saveAudioArray(audio, sampleRate: Double(model.sampleRate), to: outputURL)
+        print("\u{001B}[32mSaved generated audio to\u{001B}[0m: \(outputURL.path)")
+    }
+
+    /// Test streaming generation with Soprano model
+    @Test func testSopranoGenerateStream() async throws {
+        // 1. Load Soprano model from HuggingFace
+        print("\u{001B}[33mLoading Soprano TTS model...\u{001B}[0m")
+        let model = try await SopranoModel.fromPretrained("mlx-community/Soprano-80M-bf16")
+        print("\u{001B}[32mSoprano model loaded!\u{001B}[0m")
+
+        // 2. Generate audio with streaming
+        let text = "Streaming test for Soprano model. I think it's working."
+        print("\u{001B}[33mStreaming generation for: \"\(text)\"...\u{001B}[0m")
+
+        // Use temperature=0.0 for deterministic generation
+        let parameters = GenerateParameters(
+            maxTokens: 100,
+            temperature: 0.3,
+            topP: 1.0
+        )
+
+        var tokenCount = 0
+        var finalAudio: MLXArray?
+        var generationInfo: SopranoGenerationInfo?
+
+        for try await event in model.generateStream(text: text, parameters: parameters) {
+            switch event {
+            case .token(_):
+                tokenCount += 1
+                if tokenCount % 50 == 0 {
+                    print("  Generated \(tokenCount) tokens...")
+                }
+            case .info(let info):
+                generationInfo = info
+                print("\u{001B}[36m\(info.summary)\u{001B}[0m")
+            case .audio(let audio):
+                finalAudio = audio
+                print("\u{001B}[32mReceived final audio: \(audio.shape)\u{001B}[0m")
+            }
+        }
+
+        // 3. Verify results
+        #expect(tokenCount > 0, "Should have generated tokens")
+        #expect(finalAudio != nil, "Should have received final audio")
+        #expect(generationInfo != nil, "Should have received generation info")
+
+        if let audio = finalAudio {
+            #expect(audio.shape[0] > 0, "Audio should have samples")
+
+            // Save the audio
+            let outputURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("soprano_stream_test_output.wav")
+            try saveAudioArray(audio, sampleRate: Double(model.sampleRate), to: outputURL)
+            print("\u{001B}[32mSaved streamed audio to\u{001B}[0m: \(outputURL.path)")
+        }
+    }
+
+    /// Test text cleaning utilities
+    @Test func testTextCleaning() {
+        // Test number normalization
+        let text1 = "I have $100 and 50 cents."
+        let cleaned1 = cleanTextForSoprano(text1)
+        #expect(cleaned1.contains("one hundred dollars"), "Should expand dollar amounts")
+
+        // Test abbreviations
+        let text2 = "Dr. Smith went to the API conference."
+        let cleaned2 = cleanTextForSoprano(text2)
+        #expect(cleaned2.contains("doctor"), "Should expand Dr. to doctor")
+        #expect(cleaned2.contains("a p i"), "Should expand API")
+
+        // Test ordinals
+        let text3 = "This is the 1st and 2nd test."
+        let cleaned3 = cleanTextForSoprano(text3)
+        #expect(cleaned3.contains("first"), "Should expand 1st to first")
+        #expect(cleaned3.contains("second"), "Should expand 2nd to second")
+
+        print("\u{001B}[32mText cleaning tests passed!\u{001B}[0m")
+    }
+
+
+}

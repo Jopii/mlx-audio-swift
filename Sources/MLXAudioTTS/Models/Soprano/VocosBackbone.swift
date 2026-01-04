@@ -2,8 +2,7 @@
 //  VocosBackbone.swift
 //  MLXAudio
 //
-//  Vocos-based backbone for Soprano decoder.
-//  Ported from mlx_audio/codec/models/vocos/vocos.py
+//  Created by Prince Canuma on 04/01/2026.
 //
 
 import Foundation
