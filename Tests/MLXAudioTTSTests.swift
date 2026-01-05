@@ -10,6 +10,7 @@ import MLX
 import MLXLMCommon
 import Foundation
 
+@testable import MLXAudioCore
 @testable import MLXAudioTTS
 @testable import MLXAudioCodecs
 

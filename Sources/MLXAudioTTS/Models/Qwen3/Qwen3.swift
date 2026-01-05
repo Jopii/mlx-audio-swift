@@ -791,7 +791,8 @@ public class Qwen3Model: Module, KVCacheDimensionProvider {
                         generationTokenCount: tokenCount,
                         prefillTime: prefillTime,
                         generateTime: generateTime,
-                        tokensPerSecond: Double(tokenCount) / generateTime
+                        tokensPerSecond: Double(tokenCount) / generateTime,
+                        peakMemoryUsage: Double(Memory.peakMemory) / 1e9
                     )
                     continuation.yield(.info(info))
 

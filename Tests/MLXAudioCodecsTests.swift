@@ -12,6 +12,7 @@ import Foundation
 import MLX
 import Foundation
 
+@testable import MLXAudioCore
 @testable import MLXAudioTTS
 @testable import MLXAudioCodecs
 

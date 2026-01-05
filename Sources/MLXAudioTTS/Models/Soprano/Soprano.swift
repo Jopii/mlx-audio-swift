@@ -718,7 +718,8 @@ public class SopranoModel: Module, KVCacheDimensionProvider {
                         generationTokenCount: totalTokens,
                         prefillTime: 0,
                         generateTime: elapsed,
-                        tokensPerSecond: Double(totalTokens) / elapsed
+                        tokensPerSecond: Double(totalTokens) / elapsed,
+                        peakMemoryUsage: Double(Memory.peakMemory) / 1e9
                     )
                     continuation.yield(.info(info))
 

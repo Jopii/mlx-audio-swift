@@ -17,25 +17,29 @@ public struct AudioGenerationInfo: Sendable {
     public let prefillTime: TimeInterval
     public let generateTime: TimeInterval
     public let tokensPerSecond: Double
+    public let peakMemoryUsage: Double
 
     public init(
         promptTokenCount: Int,
         generationTokenCount: Int,
         prefillTime: TimeInterval,
         generateTime: TimeInterval,
-        tokensPerSecond: Double
+        tokensPerSecond: Double,
+        peakMemoryUsage: Double
     ) {
         self.promptTokenCount = promptTokenCount
         self.generationTokenCount = generationTokenCount
         self.prefillTime = prefillTime
         self.generateTime = generateTime
         self.tokensPerSecond = tokensPerSecond
+        self.peakMemoryUsage = peakMemoryUsage
     }
 
     public var summary: String {
         """
         Prompt:     \(promptTokenCount) tokens, \(String(format: "%.2f", Double(promptTokenCount) / max(prefillTime, 0.001))) tokens/s, \(String(format: "%.3f", prefillTime))s
         Generation: \(generationTokenCount) tokens, \(String(format: "%.2f", tokensPerSecond)) tokens/s, \(String(format: "%.3f", generateTime))s
+        Peak Memory Usage: \(peakMemoryUsage) GB
         """
     }
 }
