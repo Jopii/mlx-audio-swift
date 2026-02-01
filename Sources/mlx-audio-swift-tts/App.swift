@@ -140,7 +140,7 @@ struct CLI {
         var text: String?
         var voice: String? = nil
         var outputPath: String? = nil
-        var model = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit"
+        var model = "Marvis-AI/marvis-tts-250m-v0.2-8bit"
 
         var it = CommandLine.arguments.dropFirst().makeIterator()
         while let arg = it.next() {
@@ -185,7 +185,7 @@ struct CLI {
         Options:
           -t, --text <string>           Text to synthesize (required if not passed as trailing arg)
           -v, --voice <name>            Voice id
-              --model <repo>            HF repo id. Default: mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit
+              --model <repo>            HF repo id. Default: Marvis-AI/marvis-tts-250m-v0.2-8bit
           -o, --output <path>           Output WAV path. Default: ./output.wav
           -h, --help                    Show this help
         """)
