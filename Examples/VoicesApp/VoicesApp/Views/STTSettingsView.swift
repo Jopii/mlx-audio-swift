@@ -151,6 +151,49 @@ struct STTSettingsView: View {
             }
             .padding(.bottom, sectionSpacing)
 
+            // Chunk Duration Section
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Chunking")
+                    .font(labelFont)
+                    .foregroundStyle(.secondary)
+
+                HStack {
+                    Text("Chunk Duration")
+                        .font(textFont)
+                    Spacer()
+                    Text("\(Int(viewModel.chunkDuration))s")
+                        .font(textFont)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.top, 4)
+
+                #if os(iOS)
+                CompactSlider(
+                    value: Binding(
+                        get: { Double(viewModel.chunkDuration) },
+                        set: { viewModel.chunkDuration = Float($0) }
+                    ),
+                    range: 30...600,
+                    step: 10
+                )
+                #else
+                Slider(
+                    value: Binding(
+                        get: { Double(viewModel.chunkDuration) },
+                        set: { viewModel.chunkDuration = Float($0) }
+                    ),
+                    in: 30...600,
+                    step: 10
+                )
+                .tint(.blue)
+                #endif
+
+                Text("Split long audio into chunks at silence boundaries")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.bottom, sectionSpacing)
+
             // Language Section
             VStack(alignment: .leading, spacing: 2) {
                 Text("Language")
@@ -177,6 +220,7 @@ struct STTSettingsView: View {
                 viewModel.maxTokens = 8192
                 viewModel.temperature = 0.0
                 viewModel.language = "English"
+                viewModel.chunkDuration = 250.0
             }) {
                 Text("Reset to Defaults")
                     .font(textFont)
