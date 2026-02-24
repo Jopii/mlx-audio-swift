@@ -14,13 +14,56 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install xcpretty
-        run: gem install xcpretty --no-document
+      - name: Install xcpretty and fastlane
+        run: |
+          gem install xcpretty --no-document
+          gem install fastlane --no-document
 
       - name: Show Xcode and Swift version
         run: |
           xcodebuild -version
           swift --version
+
+      - name: Generate Certificate and Profile via fastlane
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          FASTLANE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          FASTLANE_SESSION: ${{ secrets.FASTLANE_SESSION }}
+        run: |
+          fastlane cert \
+            --username "$APPLE_ID" \
+            --output_path $RUNNER_TEMP/certs \
+            --development
+
+          fastlane sigh \
+            --username "$APPLE_ID" \
+            --app_identifier "${{ secrets.BUNDLE_ID }}" \
+            --output_path $RUNNER_TEMP/profiles \
+            --development
+
+      - name: Install Certificate to Keychain
+        run: |
+          KEYCHAIN_PATH=$RUNNER_TEMP/build.keychain
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 20)
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          security import $RUNNER_TEMP/certs/*.p12 \
+            -A -t cert -f pkcs12 \
+            -k "$KEYCHAIN_PATH"
+
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+          security set-key-partition-list \
+            -S apple-tool:,apple: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+      - name: Install Provisioning Profile
+        run: |
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+          cp $RUNNER_TEMP/profiles/*.mobileprovision \
+            ~/Library/MobileDevice/Provisioning\ Profiles/
 
       - name: Resolve Package Dependencies
         working-directory: Examples/VoicesApp
@@ -31,6 +74,10 @@ jobs:
 
       - name: Build for iOS
         working-directory: Examples/VoicesApp
+        env:
+          FASTLANE_SESSION: ${{ secrets.FASTLANE_SESSION }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          FASTLANE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
         run: |
           set -o pipefail && \
           xcodebuild build \
@@ -40,9 +87,9 @@ jobs:
             -destination 'generic/platform=iOS' \
             -configuration Release \
             CONFIGURATION_BUILD_DIR=$RUNNER_TEMP/build \
-            CODE_SIGN_IDENTITY="-" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=YES \
+            CODE_SIGN_STYLE="Automatic" \
+            -allowProvisioningUpdates \
+            -authenticationKeyID "$APPLE_ID" \
           | xcpretty
 
       - name: Ver contenido del build
