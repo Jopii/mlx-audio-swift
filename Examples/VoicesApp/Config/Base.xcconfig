@@ -1,5 +1,5 @@
 // Shared settings for all builds.
-APP_BUNDLE_ID = com.example.VoicesApp
+APP_BUNDLE_ID = com.shorpy.VoicesApp
 PRODUCT_BUNDLE_IDENTIFIER = $(APP_BUNDLE_ID)
 
 // Keep empty so Xcode prompts when needed.
