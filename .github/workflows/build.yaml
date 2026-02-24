@@ -30,6 +30,8 @@ jobs:
           FASTLANE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           FASTLANE_SESSION: ${{ secrets.FASTLANE_SESSION }}
         run: |
+          export FASTLANE_SESSION="${FASTLANE_SESSION}"
+
           fastlane cert \
             --username "$APPLE_ID" \
             --output_path $RUNNER_TEMP/certs \
@@ -37,7 +39,7 @@ jobs:
 
           fastlane sigh \
             --username "$APPLE_ID" \
-            --app_identifier "${{ secrets.BUNDLE_ID }}" \
+            --app_identifier "com.shorpy.VoicesApp" \
             --output_path $RUNNER_TEMP/profiles \
             --development
 
@@ -74,10 +76,6 @@ jobs:
 
       - name: Build for iOS
         working-directory: Examples/VoicesApp
-        env:
-          FASTLANE_SESSION: ${{ secrets.FASTLANE_SESSION }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          FASTLANE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
         run: |
           set -o pipefail && \
           xcodebuild build \
@@ -89,7 +87,6 @@ jobs:
             CONFIGURATION_BUILD_DIR=$RUNNER_TEMP/build \
             CODE_SIGN_STYLE="Automatic" \
             -allowProvisioningUpdates \
-            -authenticationKeyID "$APPLE_ID" \
           | xcpretty
 
       - name: Ver contenido del build
