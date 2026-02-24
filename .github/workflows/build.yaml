@@ -29,6 +29,17 @@ jobs:
             -project VoicesApp.xcodeproj \
             -scheme VoicesApp
 
+      - name: Diagnosticar proyecto
+        working-directory: Examples/VoicesApp
+        run: |
+          echo "=== SCHEMES ==="
+          xcodebuild -list -project VoicesApp.xcodeproj
+
+          echo "=== DESTINOS DISPONIBLES ==="
+          xcodebuild -project VoicesApp.xcodeproj \
+            -scheme VoicesApp \
+            -showdestinations 2>&1 || true
+
       - name: Build for iOS
         working-directory: Examples/VoicesApp
         run: |
