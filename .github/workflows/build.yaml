@@ -29,17 +29,6 @@ jobs:
             -project VoicesApp.xcodeproj \
             -scheme VoicesApp
 
-      - name: Diagnosticar proyecto
-        working-directory: Examples/VoicesApp
-        run: |
-          echo "=== SCHEMES ==="
-          xcodebuild -list -project VoicesApp.xcodeproj
-
-          echo "=== DESTINOS DISPONIBLES ==="
-          xcodebuild -project VoicesApp.xcodeproj \
-            -scheme VoicesApp \
-            -showdestinations 2>&1 || true
-
       - name: Build for iOS
         working-directory: Examples/VoicesApp
         run: |
@@ -51,10 +40,9 @@ jobs:
             -destination 'generic/platform=iOS' \
             -configuration Release \
             CONFIGURATION_BUILD_DIR=$RUNNER_TEMP/build \
-            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_IDENTITY="-" \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO \
-            AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            CODE_SIGNING_ALLOWED=YES \
           | xcpretty
 
       - name: Ver contenido del build
