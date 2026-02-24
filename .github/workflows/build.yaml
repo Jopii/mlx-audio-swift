@@ -1,4 +1,4 @@
-name: Build VoicesApp IPA (Unsigned)
+name: Build VoicesApp IPA
 
 on:
   push:
@@ -17,6 +17,11 @@ jobs:
       - name: Install xcpretty
         run: gem install xcpretty --no-document
 
+      - name: Show Xcode and Swift version
+        run: |
+          xcodebuild -version
+          swift --version
+
       - name: Resolve Package Dependencies
         working-directory: Examples/VoicesApp
         run: |
@@ -24,30 +29,34 @@ jobs:
             -project VoicesApp.xcodeproj \
             -scheme VoicesApp
 
-      - name: Archive (unsigned)
+      - name: Build for iOS
         working-directory: Examples/VoicesApp
         run: |
           set -o pipefail && \
-          xcodebuild archive \
+          xcodebuild build \
             -project VoicesApp.xcodeproj \
             -scheme VoicesApp \
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
-            -archivePath $RUNNER_TEMP/VoicesApp.xcarchive \
+            -configuration Release \
+            CONFIGURATION_BUILD_DIR=$RUNNER_TEMP/build \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
           | xcpretty
+
+      - name: Ver contenido del build
+        run: ls $RUNNER_TEMP/build/
 
       - name: Package IPA
         run: |
           mkdir -p $RUNNER_TEMP/Payload
-          cp -r $RUNNER_TEMP/VoicesApp.xcarchive/Products/Applications/VoicesApp.app \
-                $RUNNER_TEMP/Payload/
+          cp -r $RUNNER_TEMP/build/VoicesApp.app $RUNNER_TEMP/Payload/
           cd $RUNNER_TEMP
-          zip -r VoicesApp.ipa Payload
+          zip -r VoicesApp.ipa Payload/
 
-      - name: Upload IPA as artifact
+      - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
           name: VoicesApp-unsigned
