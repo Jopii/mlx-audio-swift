@@ -1,0 +1,55 @@
+name: Build VoicesApp IPA (Unsigned)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build IPA for Sideloading
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install xcpretty
+        run: gem install xcpretty --no-document
+
+      - name: Resolve Package Dependencies
+        working-directory: Examples/VoicesApp
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project VoicesApp.xcodeproj \
+            -scheme VoicesApp
+
+      - name: Archive (unsigned)
+        working-directory: Examples/VoicesApp
+        run: |
+          set -o pipefail && \
+          xcodebuild archive \
+            -project VoicesApp.xcodeproj \
+            -scheme VoicesApp \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -archivePath $RUNNER_TEMP/VoicesApp.xcarchive \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+          | xcpretty
+
+      - name: Package IPA
+        run: |
+          mkdir -p $RUNNER_TEMP/Payload
+          cp -r $RUNNER_TEMP/VoicesApp.xcarchive/Products/Applications/VoicesApp.app \
+                $RUNNER_TEMP/Payload/
+          cd $RUNNER_TEMP
+          zip -r VoicesApp.ipa Payload
+
+      - name: Upload IPA as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VoicesApp-unsigned
+          path: ${{ runner.temp }}/VoicesApp.ipa
+          retention-days: 30
